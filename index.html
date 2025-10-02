@@ -83,11 +83,10 @@
           </div>
 
           <div class="flex items-center gap-2 mt-2">
-           <button id="btnAddSource" class="btn-alt">＋ 収入源カードを追加</button>
-           <span class="hint">カードは最大8。ドラッグで位置入替。</span>
-           <span id="slotInfo" class="chip">空き枠 <b>8</b> / 8</span>
+            <button id="btnAddSource" class="btn-alt">＋ 収入源カードを追加</button>
+            <span class="hint">カードは最大8。ドラッグで位置入替。</span>
+            <span id="slotInfo" class="chip">空き枠 <b>8</b> / 8</span>
           </div>
-
         </div>
 
         <div class="space-y-2">
@@ -112,7 +111,7 @@
         </div>
       </div>
       
-      <!-- Source editor (name / as-is / to-be / note) -->
+      <!-- Source editor -->
       <div id="sourceEditor" class="mt-3">
         <div class="grid md:grid-cols-5 gap-3">
           <div>
@@ -192,7 +191,6 @@
         </div>
       </div>
     </section>
-    
 
     <!-- TIME BALANCE -->
     <section class="card">
@@ -250,7 +248,7 @@
         <h2 class="font-semibold">LLM用プロンプト</h2>
         <button id="btnCopyPrompt" class="btn-alt">コピー</button>
       </div>
-      <textarea id="promptBox" rows="8" class="mt-3 w-full border rounded-xl p-3 text-sm" placeholder="収入源や内訳を入力すると自動生成されます"></textarea>
+      <textarea id="promptBox" rows="10" class="mt-3 w-full border rounded-xl p-3 text-sm" placeholder="収入源や内訳を入力すると自動生成されます"></textarea>
     </section>
   </main>
 
@@ -259,705 +257,639 @@
   </footer>
 
   <script>
-   /* =========================================================
-   収入ポートフォリオ・マンダラ（No-DB / IDベース / 空枠可視化）
-   - 初期値は完全に空
-   - 8枠の上限は削除で正しく戻る
-   - 空き枠は常に見える（＋空き枠ボタン）
-   ========================================================= */
-
-/* ---------- helpers ---------- */
-function uid(){ return Math.random().toString(36).slice(2,9); }
-function fmt(n){ const v = Number(n); return isNaN(v)? 0 : Math.round(v*100)/100; }
-function esc(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function sum(arr, sel){ return arr.reduce((a,x)=> a + Number(sel? sel(x): x) || 0, 0); }
-function toast(msg){
-  const el=document.createElement('div');
-  el.textContent=msg; el.className='fixed bottom-4 right-4 bg-black text-white rounded-xl px-3 py-2 text-sm opacity-0';
-  document.body.appendChild(el);
-  requestAnimationFrame(()=>{ el.style.transition='all .2s'; el.style.opacity='0.9'; });
-  setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(),200); },1400);
-}
-
-/* ---------- color map ---------- */
-const COLOR_MAP = {
-  '農業':{cell:'bg-green-50 border-green-300', badge:'bg-green-100 border-green-300 text-green-800', btn:'#86efac'},
-  '林業':{cell:'bg-lime-50 border-lime-300', badge:'bg-lime-100 border-lime-300 text-lime-800', btn:'#bef264'},
-  '投資':{cell:'bg-blue-50 border-blue-300', badge:'bg-blue-100 border-blue-300 text-blue-800', btn:'#93c5fd'},
-  '養豚手伝い':{cell:'bg-pink-50 border-pink-300', badge:'bg-pink-100 border-pink-300 text-pink-800', btn:'#f9a8d4'},
-  '新規事業':{cell:'bg-orange-50 border-orange-300', badge:'bg-orange-100 border-orange-300 text-orange-800', btn:'#fdba74'},
-  '経営改革':{cell:'bg-purple-50 border-purple-300', badge:'bg-purple-100 border-purple-300 text-purple-800', btn:'#d8b4fe'},
-  '家族（妻）':{cell:'bg-yellow-50 border-yellow-300', badge:'bg-yellow-100 border-yellow-300 text-yellow-800', btn:'#fde047'},
-  'その他':{cell:'bg-gray-50 border-gray-300', badge:'bg-gray-100 border-gray-300 text-gray-800', btn:'#e5e7eb'},
-};
-const PALETTE = [
-  { key:'農業', label:'農業 (緑)', color:'#86efac' },
-  { key:'林業', label:'林業 (ライム/茶系)', color:'#bef264' },
-  { key:'投資', label:'投資 (青)', color:'#93c5fd' },
-  { key:'養豚手伝い', label:'養豚 (ピンク)', color:'#f9a8d4' },
-  { key:'新規事業', label:'新規事業 (オレンジ)', color:'#fdba74' },
-  { key:'経営改革', label:'経営改革 (紫)', color:'#d8b4fe' },
-  { key:'家族（妻）', label:'家族 (黄)', color:'#fde047' },
-  { key:'その他', label:'その他 (灰)', color:'#e5e7eb' },
-];
-
-/* ---------- state ---------- */
-const state = {
-  targetIncome: 0,
-  targetNote: "",
-  sources: [],                         // 初期は空
-  cfg: { dayHours: 8, weekDays: 5, workWeeks: 48 },
-  gridOrder: Array(8).fill(null),      // 外周8マスを sourceId で保持（null=空）
-  activeSourceId: null,
-  editTarget: null,
-};
-// source editor buffer
-let srcForm = { name:'', asis:0, tobe:0, note:'', colorKey:'その他' };
-
-/* ---------- persistence ---------- */
-const LS_KEY = "mandala-portfolio-colored-v2"; // v2にして既存v1と分離（任意）
-function save(){ localStorage.setItem(LS_KEY, JSON.stringify(state)); toast("保存しました"); }
-function load(){
-  const raw = localStorage.getItem(LS_KEY);
-  if(raw){
-    try{ Object.assign(state, JSON.parse(raw)); }
-    catch(e){ console.warn(e); }
-  }
-  ensureGridIdMap();
-  renderAll();
-}
-function reset(){
-  if(!confirm("全データを初期化します。よろしいですか？")) return;
-  localStorage.removeItem(LS_KEY);
-  location.reload();
-}
-
-/* ---------- grid utils (IDベース整合) ---------- */
-function ensureGridIdMap(){
-  const ids = new Set(state.sources.map(s=>s.id));
-  // 1) 不正IDをnull化
-  state.gridOrder = state.gridOrder.map(id => ids.has(id) ? id : null);
-  // 2) 未配置のsourceを空き枠へ
-  const placed = new Set(state.gridOrder.filter(Boolean));
-  state.sources.forEach(s=>{
-    if(!placed.has(s.id)){
-      const i = state.gridOrder.indexOf(null);
-      if(i>=0) state.gridOrder[i] = s.id;
-    }
-  });
-  // 3) アクティブ調整
-  if(state.activeSourceId && !ids.has(state.activeSourceId)){
-    state.activeSourceId = state.sources[0]?.id ?? null;
-  }
-}
-
-/* ---------- top mandala ---------- */
-function renderTop(){
-  // inputs
-  document.getElementById('targetIncome').value = state.targetIncome ?? 0;
-  document.getElementById('targetNote').value   = state.targetNote ?? "";
-  document.getElementById('centerIncome').textContent = fmt(state.targetIncome);
-
-  // 空き枠カウンタ
-  const empty = state.gridOrder.filter(v=>v===null).length;
-  const slot = document.getElementById('slotInfo');
-  if(slot) slot.innerHTML = `空き枠 <b>${empty}</b> / 8`;
-
-  // cells
-  const cells = [...document.querySelectorAll('#mandalaGrid [data-pos]:not([data-pos="center"])')];
-  cells.forEach((cell, i)=>{
-    cell.innerHTML = '';
-    cell.className = 'mandala-cell';
-    const sid = state.gridOrder[i];
-    const src = state.sources.find(s=>s.id===sid);
-
-    if(!src){
-      // 空きセル：＋空き枠ボタンを可視表示
-      cell.classList.add('border-dashed','bg-gray-50','border-gray-300','flex','items-center','justify-center');
-      const btn = document.createElement('button');
-      btn.className = 'btn-alt text-sm px-3 py-2';
-      btn.textContent = '＋ 空き枠（クリックで追加）';
-      btn.onclick = ()=> addSourceAt(i);
-      cell.appendChild(btn);
-      return;
+    /* ============== helpers ============== */
+    function uid(){ return Math.random().toString(36).slice(2,9); }
+    function fmt(n){ const v = Number(n); return isNaN(v)? 0 : Math.round(v*100)/100; }
+    function esc(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function sum(arr, sel){ return arr.reduce((a,x)=> a + Number(sel? sel(x): x) || 0, 0); }
+    function toast(msg){
+      const el=document.createElement('div');
+      el.textContent=msg; el.className='fixed bottom-4 right-4 bg-black text-white rounded-xl px-3 py-2 text-sm opacity-0';
+      document.body.appendChild(el);
+      requestAnimationFrame(()=>{ el.style.transition='all .2s'; el.style.opacity='0.9'; });
+      setTimeout(()=>{ el.style.opacity='0'; setTimeout(()=>el.remove(),200); },1400);
     }
 
-    const tone = COLOR_MAP[src.colorKey] || COLOR_MAP['その他'];
-    tone.cell.split(' ').forEach(c=> cell.classList.add(c));
-
-    const wrap = document.createElement('div');
-    wrap.innerHTML = `
-      <div class="mandala-aside">⇅</div>
-      <div class="mandala-title flex items-center gap-2">
-        <span class="w-2.5 h-2.5 rounded-full" style="background:${tone.btn}"></span>
-        ${esc(src.name)}
-      </div>
-      <div class="text-xs text-gray-600">As-Is → To-Be</div>
-      <div class="mandala-val">${fmt(src.asis||0)} → ${fmt(src.tobe||0)}<span class="text-base ml-1">万円</span></div>
-      <div class="mt-2 flex flex-wrap gap-2 items-center">
-        <span class="chip">内訳：${src.details?.length||0}件</span>
-        <button class="btn-alt text-xs" data-open="${src.id}">開く</button>
-        <button class="btn-alt text-xs" data-del="${src.id}">削除</button>
-      </div>`;
-    cell.appendChild(wrap);
-
-    // DnD
-    cell.draggable = true;
-    cell.ondragstart = (ev)=> ev.dataTransfer.setData('text/plain', i);
-    cell.ondragover  = (ev)=> ev.preventDefault();
-    cell.ondrop = (ev)=>{
-      ev.preventDefault();
-      const from = Number(ev.dataTransfer.getData('text/plain'));
-      [state.gridOrder[from], state.gridOrder[i]] = [state.gridOrder[i], state.gridOrder[from]];
-      save(); renderTop();
+    /* ============== colors ============== */
+    const COLOR_MAP = {
+      '農業':{cell:'bg-green-50 border-green-300', badge:'bg-green-100 border-green-300 text-green-800', btn:'#86efac'},
+      '林業':{cell:'bg-lime-50 border-lime-300', badge:'bg-lime-100 border-lime-300 text-lime-800', btn:'#bef264'},
+      '投資':{cell:'bg-blue-50 border-blue-300', badge:'bg-blue-100 border-blue-300 text-blue-800', btn:'#93c5fd'},
+      '養豚手伝い':{cell:'bg-pink-50 border-pink-300', badge:'bg-pink-100 border-pink-300 text-pink-800', btn:'#f9a8d4'},
+      '新規事業':{cell:'bg-orange-50 border-orange-300', badge:'bg-orange-100 border-orange-300 text-orange-800', btn:'#fdba74'},
+      '経営改革':{cell:'bg-purple-50 border-purple-300', badge:'bg-purple-100 border-purple-300 text-purple-800', btn:'#d8b4fe'},
+      '家族（妻）':{cell:'bg-yellow-50 border-yellow-300', badge:'bg-yellow-100 border-yellow-300 text-yellow-800', btn:'#fde047'},
+      'その他':{cell:'bg-gray-50 border-gray-300', badge:'bg-gray-100 border-gray-300 text-gray-800', btn:'#e5e7eb'},
     };
-  });
+    const PALETTE = [
+      { key:'農業', label:'農業 (緑)', color:'#86efac' },
+      { key:'林業', label:'林業 (ライム/茶系)', color:'#bef264' },
+      { key:'投資', label:'投資 (青)', color:'#93c5fd' },
+      { key:'養豚手伝い', label:'養豚 (ピンク)', color:'#f9a8d4' },
+      { key:'新規事業', label:'新規事業 (オレンジ)', color:'#fdba74' },
+      { key:'経営改革', label:'経営改革 (紫)', color:'#d8b4fe' },
+      { key:'家族（妻）', label:'家族 (黄)', color:'#fde047' },
+      { key:'その他', label:'その他 (灰)', color:'#e5e7eb' },
+    ];
 
-  document.getElementById('sumAsIs').textContent = fmt(sum(state.sources, s=>Number(s.asis||0)));
-  document.getElementById('sumToBe').textContent = fmt(sum(state.sources, s=>Number(s.tobe||0)));
-  updateCharts();
-  updatePrompt();
-}
+    /* ============== state ============== */
+    const state = {
+      targetIncome: 0,
+      targetNote: "",
+      sources: [],
+      cfg: { dayHours: 8, weekDays: 5, workWeeks: 48 },
+      gridOrder: Array(8).fill(null),
+      activeSourceId: null,
+      editTarget: null,
+    };
+    let srcForm = { name:'', asis:0, tobe:0, note:'', colorKey:'その他' };
 
-function addSourceAt(pos){
-  // 上限は「実在するsource件数」で判断
-  if(state.sources.length >= 8) return alert('収入源は最大8件までです');
+    /* ============== persistence ============== */
+    const LS_KEY = "mandala-portfolio-colored-v2";
+    function save(){ localStorage.setItem(LS_KEY, JSON.stringify(state)); toast("保存しました"); }
+    function load(){
+      const raw = localStorage.getItem(LS_KEY);
+      if(raw){ try{ Object.assign(state, JSON.parse(raw)); } catch(e){} }
+      ensureGridIdMap(); renderAll();
+    }
+    function reset(){ if(!confirm("全データを初期化します。よろしいですか？")) return; localStorage.removeItem(LS_KEY); location.reload(); }
 
-  const s = { id: uid(), name:'新しい収入源', asis:0, tobe:0, note:'', colorKey:'その他', details:[] };
-  state.sources.push(s);
-
-  // 指定位置 or 最初の空き枠に配置
-  const slot = (Number.isInteger(pos) && pos>=0 && pos<8 && state.gridOrder[pos]===null)
-    ? pos
-    : state.gridOrder.indexOf(null);
-  if(slot>=0) state.gridOrder[slot] = s.id;
-
-  state.activeSourceId = s.id;
-  save();
-  renderTop(); renderMini(); updatePrompt();
-}
-
-function swapOrder(from, to){
-  [state.gridOrder[from], state.gridOrder[to]] = [state.gridOrder[to], state.gridOrder[from]];
-  renderTop();
-}
-
-document.addEventListener('click', (e)=>{
-  const openId = e.target?.dataset?.open;
-  const delId  = e.target?.dataset?.del;
-  if(openId){ setActiveSource(openId); }
-  if(delId){
-    const idx = state.sources.findIndex(s=>s.id===delId);
-    if(idx>=0){
-      const removed = state.sources.splice(idx,1)[0];
-      // 枠を空ける（ID削除→null化）
-      state.gridOrder = state.gridOrder.map(id => id===removed.id ? null : id);
-      ensureGridIdMap(); // 整合
-      if(state.activeSourceId === removed.id){
+    /* ============== grid utils ============== */
+    function ensureGridIdMap(){
+      const ids = new Set(state.sources.map(s=>s.id));
+      state.gridOrder = state.gridOrder.map(id => ids.has(id) ? id : null);
+      const placed = new Set(state.gridOrder.filter(Boolean));
+      state.sources.forEach(s=>{
+        if(!placed.has(s.id)){
+          const i = state.gridOrder.indexOf(null);
+          if(i>=0) state.gridOrder[i] = s.id;
+        }
+      });
+      if(state.activeSourceId && !ids.has(state.activeSourceId)){
         state.activeSourceId = state.sources[0]?.id ?? null;
       }
-      save();
-      renderTop(); renderMini(); updatePrompt();
-      toast('削除しました');
     }
-  }
-});
 
-/* ---------- active source helpers ---------- */
-function getActiveSource(){
-  return state.activeSourceId ? state.sources.find(s=>s.id===state.activeSourceId) ?? null : null;
-}
-function setActiveSource(sid){
-  state.activeSourceId = sid;
-  loadSrcFormFromState();
-  renderMini();
-  document.getElementById('miniMandala').scrollIntoView({behavior:'smooth', block:'center'});
-}
+    /* ============== top mandala ============== */
+    function renderTop(){
+      document.getElementById('targetIncome').value = state.targetIncome ?? 0;
+      document.getElementById('targetNote').value   = state.targetNote ?? "";
+      document.getElementById('centerIncome').textContent = fmt(state.targetIncome);
 
-/* ---------- palette & mini mandala ---------- */
-function renderPalette(){
-  const container = document.getElementById('colorPalette');
-  container.innerHTML = '';
-  PALETTE.forEach(p=>{
-    const btn = document.createElement('button');
-    btn.title=p.label; btn.style.background=p.color; btn.setAttribute('aria-label', p.label);
-    if(srcForm.colorKey===p.key) btn.style.outline='3px solid #111827';
-    btn.onclick = ()=>{ srcForm.colorKey=p.key; renderPalette(); };
-    container.appendChild(btn);
-  });
-  const badge = document.getElementById('colorBadge');
-  const tone = COLOR_MAP[srcForm.colorKey] || COLOR_MAP['その他'];
-  badge.className = `color-chip ${tone.badge}`;
-  badge.textContent = `色：${srcForm.colorKey}`;
-}
+      const empty = state.gridOrder.filter(v=>v===null).length;
+      const slot = document.getElementById('slotInfo');
+      if(slot) slot.innerHTML = `空き枠 <b>${empty}</b> / 8`;
 
-function renderMini(){
-  const src = getActiveSource();
-  document.getElementById('activeSourceName').textContent = src ? src.name : '—';
+      const cells = [...document.querySelectorAll('#mandalaGrid [data-pos]:not([data-pos="center"])')];
+      cells.forEach((cell, i)=>{
+        cell.innerHTML = '';
+        cell.className = 'mandala-cell';
+        const sid = state.gridOrder[i];
+        const src = state.sources.find(s=>s.id===sid);
 
-  if(!src){
-    // エディタを空表示
-    ['srcName','srcAsIs','srcToBe','srcNote'].forEach(id=> document.getElementById(id).value='');
-    document.getElementById('srcTobeCenter').textContent = '0';
-    renderPalette();
-    // 8セルも空で描画
-    const cells = [...document.querySelectorAll('#miniMandala [data-dpos]:not([data-dpos="center"])')];
-    cells.forEach(cell=>{
-      cell.className='mandala-cell bg-gray-50 border-gray-300 border-dashed flex items-center justify-center';
-      cell.innerHTML='<span class="text-sm text-gray-500">収入源を選択/追加してください</span>';
-    });
-    document.getElementById('detailSumToBe').textContent='0';
-    document.getElementById('detailSumHours').textContent='0';
-    updateCapacity(); updateCharts(); updatePrompt();
-    return;
-  }
+        if(!src){
+          cell.classList.add('border-dashed','bg-gray-50','border-gray-300','flex','items-center','justify-center');
+          const btn = document.createElement('button');
+          btn.className = 'btn-alt text-sm px-3 py-2';
+          btn.textContent = '＋ 空き枠（クリックで追加）';
+          btn.onclick = ()=> addSourceAt(i);
+          cell.appendChild(btn);
+          return;
+        }
 
-  // フォーム（buffer優先）
-  document.getElementById('srcName').value = srcForm.name ?? src.name ?? '';
-  document.getElementById('srcAsIs').value = srcForm.asis ?? src.asis ?? 0;
-  document.getElementById('srcToBe').value = srcForm.tobe ?? src.tobe ?? 0;
-  document.getElementById('srcNote').value = srcForm.note ?? src.note ?? '';
-  document.getElementById('srcTobeCenter').textContent = fmt(srcForm.tobe ?? src.tobe ?? 0);
+        const tone = COLOR_MAP[src.colorKey] || COLOR_MAP['その他'];
+        tone.cell.split(' ').forEach(c=> cell.classList.add(c));
 
-  renderPalette();
+        const wrap = document.createElement('div');
+        wrap.innerHTML = `
+          <div class="mandala-aside">⇅</div>
+          <div class="mandala-title flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full" style="background:${tone.btn}"></span>
+            ${esc(src.name)}
+          </div>
+          <div class="text-xs text-gray-600">As-Is → To-Be</div>
+          <div class="mandala-val">${fmt(src.asis||0)} → ${fmt(src.tobe||0)}<span class="text-base ml-1">万円</span></div>
+          <div class="mt-2 flex flex-wrap gap-2 items-center">
+            <span class="chip">内訳：${src.details?.length||0}件</span>
+            <button class="btn-alt text-xs" data-open="${src.id}">開く</button>
+            <button class="btn-alt text-xs" data-del="${src.id}">削除</button>
+          </div>`;
+        cell.appendChild(wrap);
 
-  const cells = [...document.querySelectorAll('#miniMandala [data-dpos]:not([data-dpos="center"])')];
-  const tone = COLOR_MAP[src.colorKey] || COLOR_MAP['その他'];
-  cells.forEach((cell,i)=>{
-    cell.className='mandala-cell';
-    tone.cell.split(' ').forEach(c=> cell.classList.add(c));
-    cell.innerHTML='';
-    const d = (src.details||[])[i];
-    if(!d){
-      const add = document.createElement('button');
-      add.className='btn-alt w-full h-full'; add.textContent='＋ 追加';
-      add.onclick=()=>{
-        if((src.details||[]).length>=8) return alert('内訳は最大8件まで');
-        src.details.push({ id: uid(), name:'新しい内訳', tobe:0, days:0, dayHours:0, note:'' });
-        renderMini(); updateCapacity(); updatePrompt();
-      };
-      cell.appendChild(add);
-      return;
-    }
-    const hours = Number(d.days||0)*Number(d.dayHours||0);
-    cell.innerHTML = `
-      <div class="mandala-aside">⋯</div>
-      <div class="mandala-title flex items-center gap-2">
-        <span class="w-2.5 h-2.5 rounded-full" style="background:${tone.btn}"></span>
-        ${esc(d.name||'（未設定）')}
-      </div>
-      <div class="text-xs text-gray-600">To-Be / 年間時間</div>
-      <div class="mandala-val">${fmt(d.tobe||0)}<span class='text-base ml-1'>万円</span></div>
-      <div class="text-sm text-gray-700">${fmt(d.days||0)}日 × ${fmt(d.dayHours||0)}h = <b>${fmt(hours)}</b>h</div>
-      <div class="mt-2 flex gap-2">
-        <button class="btn-alt text-xs" data-editdid="${d.id}" data-editsid="${src.id}">編集</button>
-        <button class="btn-alt text-xs" data-ddel="${d.id}" data-sid="${src.id}">削除</button>
-      </div>`;
-  });
-
-  document.getElementById('detailSumToBe').textContent = fmt(sum(src.details||[], d=>Number(d.tobe||0)));
-  document.getElementById('detailSumHours').textContent = fmt(sum(src.details||[], d=>Number(d.days||0)*Number(d.dayHours||0)));
-  updateCapacity(); updateCharts(); updatePrompt();
-}
-
-document.addEventListener('click',(e)=>{
-  const did=e.target?.dataset?.editdid, sid=e.target?.dataset?.editsid;
-  if(did && sid){ openInlineEditor(sid,did); }
-  const delDid=e.target?.dataset?.ddel, delSid=e.target?.dataset?.sid;
-  if(delDid && delSid){
-    const s = state.sources.find(x=>x.id===delSid);
-    const i = s?.details.findIndex(x=>x.id===delDid);
-    if(i>=0){ s.details.splice(i,1); renderMini(); }
-  }
-});
-
-function openInlineEditor(sid,did){
-  const s = state.sources.find(x=>x.id===sid); const d = s.details.find(x=>x.id===did);
-  state.editTarget = {sid,did};
-  document.getElementById('edName').value = d.name||'';
-  document.getElementById('edTobe').value = d.tobe||0;
-  document.getElementById('edDays').value = d.days||0;
-  document.getElementById('edDayHours').value = d.dayHours||0;
-  document.getElementById('edNote').value = d.note||'';
-  document.getElementById('inlineEditor').classList.remove('hidden');
-}
-
-document.getElementById('btnEdSave').addEventListener('click', ()=>{
-  const {sid,did}=state.editTarget||{}; if(!sid||!did) return;
-  const s = state.sources.find(x=>x.id===sid); const d = s.details.find(x=>x.id===did);
-  d.name=document.getElementById('edName').value;
-  d.tobe=Number(document.getElementById('edTobe').value||0);
-  d.days=Number(document.getElementById('edDays').value||0);
-  d.dayHours=Number(document.getElementById('edDayHours').value||0);
-  d.note=document.getElementById('edNote').value;
-  document.getElementById('inlineEditor').classList.add('hidden');
-  save(); renderMini();
-});
-document.getElementById('btnEdDelete').addEventListener('click', ()=>{
-  const {sid,did}=state.editTarget||{}; if(!sid||!did) return;
-  const s = state.sources.find(x=>x.id===sid); const i = s.details.findIndex(x=>x.id===did);
-  if(i>=0) s.details.splice(i,1);
-  document.getElementById('inlineEditor').classList.add('hidden');
-  save(); renderMini();
-});
-document.getElementById('btnEdCancel').addEventListener('click', ()=>{
-  document.getElementById('inlineEditor').classList.add('hidden');
-});
-
-/* ---------- capacity & chart ---------- */
-['cfgDayHours','cfgWeekDays','cfgWorkWeeks'].forEach(id=>{
-  document.getElementById(id).addEventListener('input', e=>{
-    const key = id==='cfgDayHours' ? 'dayHours' : id==='cfgWeekDays' ? 'weekDays' : 'workWeeks';
-    state.cfg[key] = Number(e.target.value||0); updateCapacity(); updateCharts();
-  });
-});
-function updateCapacity(){
-  const cap = Number(state.cfg.dayHours||0)*Number(state.cfg.weekDays||0)*Number(state.cfg.workWeeks||0);
-  const needHours = sum(state.sources, s=> sum(s.details||[], d=>Number(d.days||0)*Number(d.dayHours||0)));
-  const needDays  = sum(state.sources, s=> sum(s.details||[], d=>Number(d.days||0)));
-  const margin = cap - needHours;
-  document.getElementById('dispCapacity').textContent = fmt(cap);
-  document.getElementById('dispNeedHours').textContent = fmt(needHours);
-  document.getElementById('dispNeedDays').textContent = fmt(needDays);
-  document.getElementById('dispMargin').textContent   = fmt(margin);
-  const badge = document.getElementById('judgeBadge');
-  if(margin>=0){ badge.textContent='OK'; badge.className='ok'; } else { badge.textContent='NG'; badge.className='ng'; }
-}
-
-let chart;
-function updateCharts(){
-  const ctx = document.getElementById('chartSummary'); if(!ctx) return;
-  const labels = state.sources.map(s=>s.name);
-  const hours  = state.sources.map(s=> sum(s.details||[], d=>Number(d.days||0)*Number(d.dayHours||0)));
-  const data = { labels, datasets:[{ label:'年間必要時間(h)', data: hours }] };
-  if(chart){ chart.destroy(); }
-  chart = new Chart(ctx, { type:'bar', data, options:{ responsive:true, plugins:{ legend:{ display:false } } } });
-}
-
-/* ---------- prompt ---------- */
-function updatePrompt(){
-  const lines=[];
-  lines.push("あなたは地方での複業設計に強いUX/事業開発コンサルタントです。");
-  lines.push("以下の収入ポートフォリオ（マンダラ）にもとづき、To-Be年収を達成するための戦略を、各収入源ごとに提案してください。");
-  lines.push("");
-  lines.push(`目標年収(万円)：${fmt(state.targetIncome)} / メモ：${state.targetNote||''}`);
-  lines.push("");
-  lines.push("■ 収入源一覧（As-Is → To-Be）:");
-  state.sources.forEach(s=> lines.push(`- ${s.name}: ${fmt(Number(s.asis||0))} → ${fmt(Number(s.tobe||0))}万円`));
-  lines.push("\n■ 各収入源の詳細（依存先・必要時間・To-Be金額）:");
-  state.sources.forEach(s=>{
-    if(!s.details||!s.details.length) return;
-    lines.push(`\n【${s.name}】`);
-    s.details.forEach(d=>{
-      const h=Number(d.days||0)*Number(d.dayHours||0);
-      lines.push(`- ${d.name}: To-Be ${fmt(Number(d.tobe||0))}万円 / ${fmt(Number(d.days||0))}日×${fmt(Number(d.dayHours||0))}h = ${fmt(h)}h`);
-    });
-  });
-  lines.push(
-    "\n■ 各収入源ごとに、以下の観点で具体的な戦略を提案してください：\n" +
-    "1) AARRRモデル（各フェーズ3点）\n" +
-    "2) UX五段階の改善ポイント\n" +
-    "3) 可処分時間との整合と優先度\n" +
-    "4) 明日から実行するアクション（各収入源3件・60字以内）"
-  );
-  document.getElementById('promptBox').value = lines.join('\n');
-}
-
-/* ---------- LLMプロンプト生成/コピー ---------- */
-function updatePrompt(){
-  const lines = [];
-  lines.push('あなたは地方での複業設計に強いUX/事業開発コンサルタントです。');
-  lines.push('以下の収入ポートフォリオ（マンダラ）にもとづき、To-Be年収を達成する戦略案を提案してください。\n');
-  lines.push(`目標年収(万円)：${fmt(state.targetIncome)} / メモ：${state.targetNote||''}`);
-  lines.push('収入源（As-Is→To-Be）：');
-  state.sources.forEach(s=> lines.push(`- ${s.name}: ${fmt(s.asis)} → ${fmt(s.tobe)} (万円)`));
-  lines.push('\n内訳（依存先・必要時間）：');
-  state.sources.forEach(s=>{
-    if(!s.details?.length) return;
-    lines.push(`■ ${s.name}`);
-    s.details.forEach(d=>{
-      const h = Number(d.days||0)*Number(d.dayHours||0);
-      lines.push(`  - ${d.name}: To-Be ${fmt(d.tobe)}万円 / ${fmt(d.days)}日×${fmt(d.dayHours)}h = ${fmt(h)}h`);
-    });
-  });
-  lines.push('\n出力フォーマット：\n1) AARRR（各3点）\n2) UX五段階ポイント\n3) 可処分時間との整合/優先度案\n4) 明日からの一歩（3件、各60字内）');
-  const ta = document.getElementById('promptBox'); if(ta) ta.value = lines.join('\n');
-}
-function bindCopyButton(){
-  const btn = document.getElementById('btnCopyPrompt');
-  if(!btn) return;
-  btn.addEventListener('click', async ()=>{
-    const text = document.getElementById('promptBox')?.value ?? '';
-    if(!text){ toast('コピーする内容がありません'); return; }
-    try{
-      await navigator.clipboard.writeText(text);
-      toast('プロンプトをコピーしました');
-    }catch(_){
-      // フォールバック
-      const tmp = document.createElement('textarea');
-      tmp.value = text; tmp.style.position='fixed'; tmp.style.top='-1000px'; tmp.style.opacity='0';
-      document.body.appendChild(tmp); tmp.focus(); tmp.select();
-      const ok = document.execCommand('copy'); document.body.removeChild(tmp);
-      toast(ok ? 'プロンプトをコピーしました' : 'コピーに失敗しました');
-    }
-  });
-}
-
-/* ---------- JSON/CSV I/O ---------- */
-// CSV 生成
-function toCSV(rows){
-  return rows.map(row => row.map(v=>{
-    const s = (v ?? '').toString();
-    const need = /[",\n\r]/.test(s);
-    return need ? `"${s.replace(/"/g,'""')}"` : s;
-  }).join(',')).join('\n');
-}
-// CSV パース（引用符対応）
-function parseCSV(text){
-  const rows = []; let cur='', row=[], inQ=false, i=0;
-  while(i<text.length){
-    const ch = text[i];
-    if(inQ){
-      if(ch === '"'){
-        if(text[i+1] === '"'){ cur += '"'; i+=2; continue; }
-        inQ=false; i++; continue;
-      }
-      cur += ch; i++; continue;
-    }else{
-      if(ch === '"'){ inQ=true; i++; continue; }
-      if(ch === ','){ row.push(cur); cur=''; i++; continue; }
-      if(ch === '\n' || ch === '\r'){
-        if(ch === '\r' && text[i+1] === '\n') i++;
-        row.push(cur); rows.push(row); cur=''; row=[]; i++; continue;
-      }
-      cur += ch; i++; continue;
-    }
-  }
-  if(cur!=='' || row.length){ row.push(cur); rows.push(row); }
-  return rows.map(r=> r.map(c=> c.trim()));
-}
-// ヘッダ→インデックス
-function headerIndexMap(header){
-  const idx = {}; header.forEach((h,i)=> idx[h]=i);
-  const alias = {
-    '収入源':'収入源','カテゴリ':'収入源','source':'収入源',
-    '内訳':'内訳','detail':'内訳','項目':'内訳',
-    'To-Be(万円)':'To-Be(万円)','tobe':'To-Be(万円)',
-    '年間日数':'年間日数','days':'年間日数',
-    '1日時間(h)':'1日時間(h)','dayHours':'1日時間(h)',
-    '年間時間(h)':'年間時間(h)','hours':'年間時間(h)',
-    '収入源AsIs(万円)':'収入源AsIs(万円)','asis':'収入源AsIs(万円)',
-    '収入源ToBe(万円)':'収入源ToBe(万円)','sourceTobe':'収入源ToBe(万円)',
-    '色':'色','color':'色',
-    '収入源メモ':'収入源メモ','sourceNote':'収入源メモ',
-    '内訳メモ':'内訳メモ','detailNote':'内訳メモ',
-    '目標年収(万円)':'目標年収(万円)','targetIncome':'目標年収(万円)'
-  };
-  const map = {};
-  Object.keys(alias).forEach(k=>{
-    const std = alias[k];
-    if(idx[k]!=null && map[std]==null) map[std]=idx[k];
-  });
-  Object.keys(idx).forEach(k=>{ if(map[k]==null) map[k]=idx[k]; });
-  return map;
-}
-// JSON Export
-function exportJSON(){
-  const data = JSON.stringify(state, null, 2);
-  const blob = new Blob([data], {type:'application/json'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'mandala_portfolio.json';
-  a.click();
-}
-// CSV Export（出力＝入力フォーマット）
-function exportCSV(){
-  const headers = [
-    '収入源','内訳','To-Be(万円)','年間日数','1日時間(h)','年間時間(h)',
-    '収入源AsIs(万円)','収入源ToBe(万円)','色','収入源メモ','内訳メモ','目標年収(万円)'
-  ];
-  const rows = [headers];
-  state.sources.forEach(s=>{
-    if(s.details?.length){
-      s.details.forEach(d=>{
-        const h = Number(d.days||0)*Number(d.dayHours||0);
-        rows.push([ s.name, d.name||'', d.tobe||0, d.days||0, d.dayHours||0, h,
-          s.asis||0, s.tobe||0, s.colorKey||'その他', s.note||'', d.note||'', state.targetIncome||0 ]);
+        cell.draggable = true;
+        cell.ondragstart = (ev)=> ev.dataTransfer.setData('text/plain', i);
+        cell.ondragover  = (ev)=> ev.preventDefault();
+        cell.ondrop = (ev)=>{
+          ev.preventDefault();
+          const from = Number(ev.dataTransfer.getData('text/plain'));
+          [state.gridOrder[from], state.gridOrder[i]] = [state.gridOrder[i], state.gridOrder[from]];
+          save(); renderTop();
+        };
       });
-    }else{
-      rows.push([ s.name, '', '', '', '', '',
-        s.asis||0, s.tobe||0, s.colorKey||'その他', s.note||'','', state.targetIncome||0 ]);
+
+      document.getElementById('sumAsIs').textContent = fmt(sum(state.sources, s=>Number(s.asis||0)));
+      document.getElementById('sumToBe').textContent = fmt(sum(state.sources, s=>Number(s.tobe||0)));
+      updateCharts(); updatePrompt();
     }
-  });
-  const csv = toCSV(rows);
-  const blob = new Blob(["\ufeff"+csv], {type:'text/csv;charset=utf-8;'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'mandala_portfolio.csv';
-  a.click();
-}
-// JSON Import
-function importJSONFile(file){
-  const reader = new FileReader();
-  reader.onload = ()=>{
-    try{
-      const obj = JSON.parse(reader.result);
-      Object.assign(state, obj);
-      ensureGridIdMap();
-      state.activeSourceId = state.sources[0]?.id ?? null;
-      renderAll(); save(); toast('JSONを読み込みました');
-    }catch(e){
-      console.error(e); alert('JSON読み込み失敗：内容をご確認ください');
+
+    function addSourceAt(pos){
+      if(state.sources.length >= 8) return alert('収入源は最大8件までです');
+      const s = { id: uid(), name:'新しい収入源', asis:0, tobe:0, note:'', colorKey:'その他', details:[] };
+      state.sources.push(s);
+      const slot = (Number.isInteger(pos) && pos>=0 && pos<8 && state.gridOrder[pos]===null) ? pos : state.gridOrder.indexOf(null);
+      if(slot>=0) state.gridOrder[slot] = s.id;
+      state.activeSourceId = s.id;
+      save(); renderTop(); renderMini(); updatePrompt();
     }
-  };
-  reader.readAsText(file);
-}
-// CSV Import（出力と同フォーマット）
-function importCSVFile(file){
-  const reader = new FileReader();
-  reader.onload = ()=>{
-    try{
-      const rows = parseCSV(reader.result).filter(r=> r.some(c=>c!==''));
-      if(!rows.length) throw new Error('空のCSVです');
-      const header = rows[0]; const m = headerIndexMap(header);
-      if(m['収入源']==null) throw new Error('「収入源」列がありません');
 
-      const byName = new Map(); let tgtIncome = null;
-      for(let i=1;i<rows.length;i++){
-        const r = rows[i];
-        const name = r[m['収入源']] || ''; if(!name) continue;
-        const dName = m['内訳']!=null ? r[m['内訳']] : '';
-        const tobe  = m['To-Be(万円)']!=null ? Number(r[m['To-Be(万円)']]||0) : 0;
-        const days  = m['年間日数']!=null ? Number(r[m['年間日数']]||0) : 0;
-        const dh    = m['1日時間(h)']!=null ? Number(r[m['1日時間(h)']]||0) : 0;
-
-        const sAsIs = m['収入源AsIs(万円)']!=null ? Number(r[m['収入源AsIs(万円)']]||0) : null;
-        const sTobe = m['収入源ToBe(万円)']!=null ? Number(r[m['収入源ToBe(万円)']]||0) : null;
-        const color = m['色']!=null ? (r[m['色']]||'').trim() : '';
-        const sNote = m['収入源メモ']!=null ? r[m['収入源メモ']] : '';
-        const dNote = m['内訳メモ']!=null ? r[m['内訳メモ']] : '';
-        const tiRaw = m['目標年収(万円)']!=null ? r[m['目標年収(万円)']] : '';
-        if(tiRaw!=='' && !isNaN(Number(tiRaw))) tgtIncome = Number(tiRaw);
-
-        if(!byName.has(name)){
-          const colorKey = Object.prototype.hasOwnProperty.call(COLOR_MAP, color) ? color : 'その他';
-          byName.set(name, { id: uid(), name, asis: 0, tobe: 0, note: '', colorKey, details: [] });
-        }
-        const s = byName.get(name);
-        if(sAsIs!=null) s.asis = sAsIs;
-        if(sTobe!=null) s.tobe = sTobe;
-        if(sNote) s.note = sNote;
-        if(color) s.colorKey = Object.prototype.hasOwnProperty.call(COLOR_MAP, color) ? color : s.colorKey;
-
-        const hasDetail = (dName && dName !== '(未設定)') || (tobe||days||dh);
-        if(hasDetail){
-          s.details.push({ id: uid(), name: dName||'(未設定)', tobe: tobe||0, days: days||0, dayHours: dh||0, note: dNote||'' });
+    document.addEventListener('click', (e)=>{
+      const openId = e.target?.dataset?.open;
+      const delId  = e.target?.dataset?.del;
+      if(openId){ setActiveSource(openId); }
+      if(delId){
+        const idx = state.sources.findIndex(s=>s.id===delId);
+        if(idx>=0){
+          const removed = state.sources.splice(idx,1)[0];
+          state.gridOrder = state.gridOrder.map(id => id===removed.id ? null : id);
+          ensureGridIdMap();
+          if(state.activeSourceId === removed.id){ state.activeSourceId = state.sources[0]?.id ?? null; }
+          save(); renderTop(); renderMini(); updatePrompt(); toast('削除しました');
         }
       }
+    });
 
-      const sources = Array.from(byName.values());
-      sources.forEach(s=>{ if(!s.tobe) s.tobe = s.details.reduce((a,d)=> a + Number(d.tobe||0), 0); });
-
-      state.sources = sources.slice(0,8);
-      state.gridOrder = Array(8).fill(null);
-      state.sources.forEach((s,i)=>{ if(i<8) state.gridOrder[i] = s.id; });
-      state.activeSourceId = state.sources[0]?.id ?? null;
-      if(tgtIncome!=null) state.targetIncome = tgtIncome;
-
-      renderAll(); save(); toast('CSVを読み込みました');
-    }catch(err){
-      console.error(err);
-      alert('CSV読み込み失敗：出力CSVと同じ列見出しを使用してください');
+    function setActiveSource(sid){
+      state.activeSourceId = sid;
+      loadSrcFormFromState();
+      renderMini();
+      document.getElementById('miniMandala').scrollIntoView({behavior:'smooth', block:'center'});
     }
-  };
-  reader.readAsText(file);
-}
-// ボタンバインド
-function registerIOBindings(){
-  document.getElementById('btnExportJSON')?.addEventListener('click', exportJSON);
-  document.getElementById('btnExportCSV')?.addEventListener('click', exportCSV);
-  document.getElementById('fileImport')?.addEventListener('change', e=>{
-    const f = e.target.files[0]; if(!f) return; importJSONFile(f); e.target.value='';
-  });
-  document.getElementById('fileImportCSV')?.addEventListener('change', e=>{
-    const f = e.target.files[0]; if(!f) return; importCSVFile(f); e.target.value='';
-  });
-}
+    function getActiveSource(){ return state.activeSourceId ? state.sources.find(s=>s.id===state.activeSourceId) ?? null : null; }
 
-/* ---------- フォーム・起動 ---------- */
-function loadSrcFormFromState(){
-  const s = getActiveSource();
-  if(!s){ srcForm = {name:'', asis:0, tobe:0, note:'', colorKey:'その他'}; return; }
-  srcForm = {
-    name: s.name||'',
-    asis: Number(s.asis||0),
-    tobe: Number(s.tobe||0),
-    note: s.note||'',
-    colorKey: s.colorKey || 'その他'
-  };
-}
-function writeSrcFormToState(){
-  const s = getActiveSource(); if(!s) return;
-  s.name = srcForm.name||'';
-  s.asis = Number(srcForm.asis||0);
-  s.tobe = Number(srcForm.tobe||0);
-  s.note = srcForm.note||'';
-  s.colorKey = srcForm.colorKey || s.colorKey || 'その他';
-}
-function renderAll(){
-  // 上部入力
-  document.getElementById('targetIncome').addEventListener('input', e=>{
-    state.targetIncome = Number(e.target.value||0);
-    document.getElementById('centerIncome').textContent = fmt(state.targetIncome);
-    updatePrompt();
-  });
-  document.getElementById('targetNote').addEventListener('input', e=>{
-    state.targetNote = e.target.value; updatePrompt();
-  });
+    /* ============== palette & mini ============== */
+    function renderPalette(){
+      const container = document.getElementById('colorPalette');
+      container.innerHTML = '';
+      PALETTE.forEach(p=>{
+        const btn = document.createElement('button');
+        btn.title=p.label; btn.style.background=p.color; btn.setAttribute('aria-label', p.label);
+        if(srcForm.colorKey===p.key) btn.style.outline='3px solid #111827';
+        btn.onclick = ()=>{ srcForm.colorKey=p.key; renderPalette(); };
+        container.appendChild(btn);
+      });
+      const badge = document.getElementById('colorBadge');
+      const tone = COLOR_MAP[srcForm.colorKey] || COLOR_MAP['その他'];
+      badge.className = `color-chip ${tone.badge}`;
+      badge.textContent = `色：${srcForm.colorKey}`;
+    }
 
-  // 収入源エディタ（バッファ）
-  document.getElementById('srcName').addEventListener('input', e=>{ srcForm.name = e.target.value; });
-  document.getElementById('srcAsIs').addEventListener('input', e=>{ srcForm.asis = Number(e.target.value||0); });
-  document.getElementById('srcToBe').addEventListener('input', e=>{
-    srcForm.tobe = Number(e.target.value||0);
-    document.getElementById('srcTobeCenter').textContent = fmt(srcForm.tobe||0);
-  });
-  document.getElementById('srcNote').addEventListener('input', e=>{ srcForm.note = e.target.value; });
+    function renderMini(){
+      const src = getActiveSource();
+      document.getElementById('activeSourceName').textContent = src ? src.name : '—';
 
-  // コントロール
-  document.getElementById('btnSave').addEventListener('click', save);
-  document.getElementById('btnReset').addEventListener('click', reset);
-  document.getElementById('btnAddSource').addEventListener('click', ()=>{
-    const pos = state.gridOrder.indexOf(null);
-    if(pos === -1) return alert('8枠すべて使用中です。どれか削除してください。');
-    addSourceAt(pos);
-  });
+      if(!src){
+        ['srcName','srcAsIs','srcToBe','srcNote'].forEach(id=> document.getElementById(id).value='');
+        document.getElementById('srcTobeCenter').textContent = '0';
+        renderPalette();
+        const cells = [...document.querySelectorAll('#miniMandala [data-dpos]:not([data-dpos="center"])')];
+        cells.forEach(cell=>{
+          cell.className='mandala-cell bg-gray-50 border-gray-300 border-dashed flex items-center justify-center';
+          cell.innerHTML='<span class="text-sm text-gray-500">収入源を選択/追加してください</span>';
+        });
+        document.getElementById('detailSumToBe').textContent='0';
+        document.getElementById('detailSumHours').textContent='0';
+        updateCapacity(); updateCharts(); updatePrompt();
+        return;
+      }
 
-  // 収入源エディタのボタン
-  document.getElementById('btnSrcSave').addEventListener('click', ()=>{
-    writeSrcFormToState(); save(); renderTop(); renderMini(); updatePrompt(); toast('登録しました');
-  });
-  document.getElementById('btnSrcCancel').addEventListener('click', ()=>{
-    loadSrcFormFromState(); renderMini(); toast('キャンセルしました');
-  });
-  document.getElementById('btnSrcDelete').addEventListener('click', ()=>{
-    const s = getActiveSource(); if(!s) return;
-    if(!confirm('この収入源を削除しますか？')) return;
-    removeSourceById(s.id);
-    save(); renderTop(); loadSrcFormFromState(); renderMini(); updatePrompt(); toast('削除しました');
-  });
+      document.getElementById('srcName').value = srcForm.name ?? src.name ?? '';
+      document.getElementById('srcAsIs').value = srcForm.asis ?? src.asis ?? 0;
+      document.getElementById('srcToBe').value = srcForm.tobe ?? src.tobe ?? 0;
+      document.getElementById('srcNote').value = srcForm.note ?? src.note ?? '';
+      document.getElementById('srcTobeCenter').textContent = fmt(srcForm.tobe ?? src.tobe ?? 0);
+      renderPalette();
 
-  registerIOBindings();
-  bindCopyButton();
+      const cells = [...document.querySelectorAll('#miniMandala [data-dpos]:not([data-dpos="center"])')];
+      const tone = COLOR_MAP[src.colorKey] || COLOR_MAP['その他'];
+      cells.forEach((cell,i)=>{
+        cell.className='mandala-cell';
+        tone.cell.split(' ').forEach(c=> cell.classList.add(c));
+        cell.innerHTML='';
+        const d = (src.details||[])[i];
+        if(!d){
+          const add = document.createElement('button');
+          add.className='btn-alt w-full h-full'; add.textContent='＋ 追加';
+          add.onclick=()=>{
+            if((src.details||[]).length>=8) return alert('内訳は最大8件まで');
+            src.details.push({ id: uid(), name:'新しい内訳', tobe:0, days:0, dayHours:0, note:'' });
+            renderMini(); updateCapacity(); updatePrompt();
+          };
+          cell.appendChild(add);
+          return;
+        }
+        const hours = Number(d.days||0)*Number(d.dayHours||0);
+        cell.innerHTML = `
+          <div class="mandala-aside">⋯</div>
+          <div class="mandala-title flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full" style="background:${tone.btn}"></span>
+            ${esc(d.name||'（未設定）')}
+          </div>
+          <div class="text-xs text-gray-600">To-Be / 年間時間</div>
+          <div class="mandala-val">${fmt(d.tobe||0)}<span class='text-base ml-1'>万円</span></div>
+          <div class="text-sm text-gray-700">${fmt(d.days||0)}日 × ${fmt(d.dayHours||0)}h = <b>${fmt(hours)}</b>h</div>
+          <div class="mt-2 flex gap-2">
+            <button class="btn-alt text-xs" data-editdid="${d.id}" data-editsid="${src.id}">編集</button>
+            <button class="btn-alt text-xs" data-ddel="${d.id}" data-sid="${src.id}">削除</button>
+          </div>`;
+      });
 
-  // 初回描画
-  renderTop(); loadSrcFormFromState(); renderMini(); updateCapacity(); updateCharts(); updatePrompt();
-}
+      document.getElementById('detailSumToBe').textContent = fmt(sum(src.details||[], d=>Number(d.tobe||0)));
+      document.getElementById('detailSumHours').textContent = fmt(sum(src.details||[], d=>Number(d.days||0)*Number(d.dayHours||0)));
+      updateCapacity(); updateCharts(); updatePrompt();
+    }
 
-// 起動
-window.addEventListener('load', load);
+    document.addEventListener('click',(e)=>{
+      const did=e.target?.dataset?.editdid, sid=e.target?.dataset?.editsid;
+      if(did && sid){ openInlineEditor(sid,did); }
+      const delDid=e.target?.dataset?.ddel, delSid=e.target?.dataset?.sid;
+      if(delDid && delSid){
+        const s = state.sources.find(x=>x.id===delSid);
+        const i = s?.details.findIndex(x=>x.id===delDid);
+        if(i>=0){ s.details.splice(i,1); renderMini(); }
+      }
+    });
 
+    function openInlineEditor(sid,did){
+      const s = state.sources.find(x=>x.id===sid); const d = s.details.find(x=>x.id===did);
+      state.editTarget = {sid,did};
+      document.getElementById('edName').value = d.name||'';
+      document.getElementById('edTobe').value = d.tobe||0;
+      document.getElementById('edDays').value = d.days||0;
+      document.getElementById('edDayHours').value = d.dayHours||0;
+      document.getElementById('edNote').value = d.note||'';
+      document.getElementById('inlineEditor').classList.remove('hidden');
+    }
+    document.getElementById('btnEdSave').addEventListener('click', ()=>{
+      const {sid,did}=state.editTarget||{}; if(!sid||!did) return;
+      const s = state.sources.find(x=>x.id===sid); const d = s.details.find(x=>x.id===did);
+      d.name=document.getElementById('edName').value;
+      d.tobe=Number(document.getElementById('edTobe').value||0);
+      d.days=Number(document.getElementById('edDays').value||0);
+      d.dayHours=Number(document.getElementById('edDayHours').value||0);
+      d.note=document.getElementById('edNote').value;
+      document.getElementById('inlineEditor').classList.add('hidden');
+      save(); renderMini();
+    });
+    document.getElementById('btnEdDelete').addEventListener('click', ()=>{
+      const {sid,did}=state.editTarget||{}; if(!sid||!did) return;
+      const s = state.sources.find(x=>x.id===sid); const i = s.details.findIndex(x=>x.id===did);
+      if(i>=0) s.details.splice(i,1);
+      document.getElementById('inlineEditor').classList.add('hidden');
+      save(); renderMini();
+    });
+    document.getElementById('btnEdCancel').addEventListener('click', ()=>{
+      document.getElementById('inlineEditor').classList.add('hidden');
+    });
 
+    /* ============== capacity & chart ============== */
+    ['cfgDayHours','cfgWeekDays','cfgWorkWeeks'].forEach(id=>{
+      document.getElementById(id).addEventListener('input', e=>{
+        const key = id==='cfgDayHours' ? 'dayHours' : id==='cfgWeekDays' ? 'weekDays' : 'workWeeks';
+        state.cfg[key] = Number(e.target.value||0); updateCapacity(); updateCharts();
+      });
+    });
+    function updateCapacity(){
+      const cap = Number(state.cfg.dayHours||0)*Number(state.cfg.weekDays||0)*Number(state.cfg.workWeeks||0);
+      const needHours = sum(state.sources, s=> sum(s.details||[], d=>Number(d.days||0)*Number(d.dayHours||0)));
+      const needDays  = sum(state.sources, s=> sum(s.details||[], d=>Number(d.days||0)));
+      const margin = cap - needHours;
+      document.getElementById('dispCapacity').textContent = fmt(cap);
+      document.getElementById('dispNeedHours').textContent = fmt(needHours);
+      document.getElementById('dispNeedDays').textContent = fmt(needDays);
+      document.getElementById('dispMargin').textContent   = fmt(margin);
+      const badge = document.getElementById('judgeBadge');
+      if(margin>=0){ badge.textContent='OK'; badge.className='ok'; } else { badge.textContent='NG'; badge.className='ng'; }
+    }
+
+    let chart;
+    function updateCharts(){
+      const ctx = document.getElementById('chartSummary'); if(!ctx) return;
+      const labels = state.sources.map(s=>s.name);
+      const hours  = state.sources.map(s=> sum(s.details||[], d=>Number(d.days||0)*Number(d.dayHours||0)));
+      const data = { labels, datasets:[{ label:'年間必要時間(h)', data: hours }] };
+      if(chart){ chart.destroy(); }
+      chart = new Chart(ctx, { type:'bar', data, options:{ responsive:true, plugins:{ legend:{ display:false } } } });
+    }
+
+    /* ============== prompt (全面刷新) ============== */
+    function buildEfficiency(valueManYen, hours){
+      const h = Number(hours||0);
+      if(!h) return 'N/A';
+      return fmt(Number(valueManYen||0) / h); // 万円/h
+    }
+
+    function updatePrompt(){
+      const lines = [];
+      const target = fmt(state.targetIncome);
+      const sumToBe = fmt(sum(state.sources, s=>Number(s.tobe||0)));
+      const cap = fmt(Number(state.cfg.dayHours||0)*Number(state.cfg.weekDays||0)*Number(state.cfg.workWeeks||0));
+      const needHours = fmt(sum(state.sources, s=> sum(s.details||[], d=>Number(d.days||0)*Number(d.dayHours||0))));
+      const margin = fmt(cap - needHours);
+      const gapIncome = fmt(target - sumToBe);
+
+      // 1) To-Beあるべき姿（先頭で目的を固定）
+      lines.push('【To-Be あるべき姿】');
+      lines.push(`- 最低年収目標：${target} 万円（メモ：${state.targetNote || '—'}）`);
+      lines.push(`- 現在のTo-Be合計：${sumToBe} 万円（目標との差分：${gapIncome} 万円）`);
+      lines.push(`- 年間可処分時間：${cap} h / 必要時間合計：${needHours} h / マージン：${margin} h`);
+      lines.push('→ 収入目標と稼働制約の両立を前提に、優先順位・実行順を最短で合致させる。');
+      lines.push('');
+
+      // 2) データ提供（収入源サマリ + 効率）
+      lines.push('【収入源サマリ（As-Is → To-Be / 時給効率）】');
+      state.sources.forEach(s=>{
+        const hours = sum(s.details||[], d=>Number(d.days||0)*Number(d.dayHours||0));
+        const eff = buildEfficiency(s.tobe, hours);
+        lines.push(`- ${s.name}：${fmt(s.asis||0)} → ${fmt(s.tobe||0)} 万円 / 必要時間 ${fmt(hours)} h / 効率 ${eff} 万円/h`);
+      });
+      lines.push('');
+
+      // 3) 内訳（各詳細 + 効率）
+      lines.push('【内訳（依存先・必要時間・効率）】');
+      state.sources.forEach(s=>{
+        if(!s.details?.length) return;
+        lines.push(`■ ${s.name}`);
+        s.details.forEach(d=>{
+          const h = Number(d.days||0)*Number(d.dayHours||0);
+          const eff = buildEfficiency(d.tobe, h);
+          lines.push(`- ${d.name}: To-Be ${fmt(d.tobe)} 万円 / ${fmt(d.days)}日×${fmt(d.dayHours)}h = ${fmt(h)}h / 効率 ${eff} 万円/h`);
+        });
+      });
+      lines.push('');
+
+      // 4) 出力フォーマット（ご要望に合わせて刷新）
+      lines.push('【出力フォーマット】');
+      lines.push('1) 可処分時間との整合 / 優先度案の整理（簡易ガントチャート）');
+      lines.push('   - 期間：今四半期→次四半期（週または月粒度）。各収入源をスイムレーン化。');
+      lines.push('   - 各タスク：開始/終了、依存関係、達成条件（定量KPI）、必要h、担当、リスクと対応。');
+      lines.push('   - マージン内（年間 ' + cap + 'h）の範囲で山積みが収まる並びへ再配置。');
+      lines.push('2) リーンキャンバス（収入源ごとに作成）');
+      lines.push('   ①課題 ②顧客セグメント ③独自の価値提案 ④ソリューション ⑤チャネル ⑥収益の流れ ⑦コスト構造 ⑧主要指標 ⑨圧倒的な優位性');
+      lines.push('   - 上記9要素を各収入源および全体統合で提示。');
+      lines.push('3) インセプションデッキ（全体計画）');
+      lines.push('   1 我々はなぜここにいるのか？');
+      lines.push('   2 エレベーターピッチ');
+      lines.push('   3 パッケージデザイン（UI/UX）');
+      lines.push('   4 やらないことリスト');
+      lines.push('   5 「ご近所さん」を探せ（プロジェクトコミュニティ、ユーザーストーリーマッピング）');
+      lines.push('   6 解決案を描く（ざっくりアーキテクチャ図）');
+      lines.push('   7 夜も眠れなくなるような問題（主要リスクと対応）');
+      lines.push('   8 期間を見極める（里程標とゲート）');
+      lines.push('   9 何を諦めるのか（トレードオフスライダー）');
+      lines.push('   10 何がどれだけ必要なのか（体制・コスト・スキル）');
+      lines.push('');
+      lines.push('【指示】');
+      lines.push('- 「効率（万円/h）」が高い順に優先度を提案し、ガントへ反映。低効率項目は削減/改善案も提示。');
+      lines.push('- 収入目標に未達なら、差分（' + gapIncome + ' 万円）を埋める代替案（価格・ボリューム・新規源・内訳改善）を提示。');
+      lines.push('- 出力は見出し・箇条書きを用い、最後に「次の1週間の行動計画（各日1–2タスク）」を添付。');
+
+      document.getElementById('promptBox').value = lines.join('\n');
+    }
+
+    /* ============== I/O ============== */
+    function toCSV(rows){
+      return rows.map(row => row.map(v=>{
+        const s = (v ?? '').toString();
+        const need = /[",\n\r]/.test(s);
+        return need ? `"${s.replace(/"/g,'""')}"` : s;
+      }).join(',')).join('\n');
+    }
+    function parseCSV(text){
+      const rows = []; let cur='', row=[], inQ=false, i=0;
+      while(i<text.length){
+        const ch = text[i];
+        if(inQ){
+          if(ch === '"'){
+            if(text[i+1] === '"'){ cur += '"'; i+=2; continue; }
+            inQ=false; i++; continue;
+          }
+          cur += ch; i++; continue;
+        }else{
+          if(ch === '"'){ inQ=true; i++; continue; }
+          if(ch === ','){ row.push(cur); cur=''; i++; continue; }
+          if(ch === '\n' || ch === '\r'){
+            if(ch === '\r' && text[i+1] === '\n') i++;
+            row.push(cur); rows.push(row); cur=''; row=[]; i++; continue;
+          }
+          cur += ch; i++; continue;
+        }
+      }
+      if(cur!=='' || row.length){ row.push(cur); rows.push(row); }
+      return rows.map(r=> r.map(c=> c.trim()));
+    }
+    function headerIndexMap(header){
+      const idx = {}; header.forEach((h,i)=> idx[h]=i);
+      const alias = {
+        '収入源':'収入源','カテゴリ':'収入源','source':'収入源',
+        '内訳':'内訳','detail':'内訳','項目':'内訳',
+        'To-Be(万円)':'To-Be(万円)','tobe':'To-Be(万円)',
+        '年間日数':'年間日数','days':'年間日数',
+        '1日時間(h)':'1日時間(h)','dayHours':'1日時間(h)',
+        '年間時間(h)':'年間時間(h)','hours':'年間時間(h)',
+        '収入源AsIs(万円)':'収入源AsIs(万円)','asis':'収入源AsIs(万円)',
+        '収入源ToBe(万円)':'収入源ToBe(万円)','sourceTobe':'収入源ToBe(万円)',
+        '色':'色','color':'色',
+        '収入源メモ':'収入源メモ','sourceNote':'収入源メモ',
+        '内訳メモ':'内訳メモ','detailNote':'内訳メモ',
+        '目標年収(万円)':'目標年収(万円)','targetIncome':'目標年収(万円)'
+      };
+      const map = {};
+      Object.keys(alias).forEach(k=>{ const std=alias[k]; if(idx[k]!=null && map[std]==null) map[std]=idx[k]; });
+      Object.keys(idx).forEach(k=>{ if(map[k]==null) map[k]=idx[k]; });
+      return map;
+    }
+    function exportJSON(){
+      const data = JSON.stringify(state, null, 2);
+      const blob = new Blob([data], {type:'application/json'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'mandala_portfolio.json'; a.click();
+    }
+    function exportCSV(){
+      const headers = ['収入源','内訳','To-Be(万円)','年間日数','1日時間(h)','年間時間(h)','収入源AsIs(万円)','収入源ToBe(万円)','色','収入源メモ','内訳メモ','目標年収(万円)'];
+      const rows = [headers];
+      state.sources.forEach(s=>{
+        if(s.details?.length){
+          s.details.forEach(d=>{
+            const h = Number(d.days||0)*Number(d.dayHours||0);
+            rows.push([ s.name, d.name||'', d.tobe||0, d.days||0, d.dayHours||0, h,
+              s.asis||0, s.tobe||0, s.colorKey||'その他', s.note||'', d.note||'', state.targetIncome||0 ]);
+          });
+        }else{
+          rows.push([ s.name, '', '', '', '', '',
+            s.asis||0, s.tobe||0, s.colorKey||'その他', s.note||'','', state.targetIncome||0 ]);
+        }
+      });
+      const csv = toCSV(rows);
+      const blob = new Blob(["\ufeff"+csv], {type:'text/csv;charset=utf-8;'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'mandala_portfolio.csv'; a.click();
+    }
+    function importJSONFile(file){
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        try{ const obj = JSON.parse(reader.result); Object.assign(state, obj); ensureGridIdMap(); state.activeSourceId = state.sources[0]?.id ?? null; renderAll(); save(); toast('JSONを読み込みました'); }
+        catch(e){ console.error(e); alert('JSON読み込み失敗：内容をご確認ください'); }
+      };
+      reader.readAsText(file);
+    }
+    function importCSVFile(file){
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        try{
+          const rows = parseCSV(reader.result).filter(r=> r.some(c=>c!==''));
+          if(!rows.length) throw new Error('空のCSVです');
+          const header = rows[0]; const m = headerIndexMap(header);
+          if(m['収入源']==null) throw new Error('「収入源」列がありません');
+
+          const byName = new Map(); let tgtIncome = null;
+          for(let i=1;i<rows.length;i++){
+            const r = rows[i];
+            const name = r[m['収入源']] || ''; if(!name) continue;
+            const dName = m['内訳']!=null ? r[m['内訳']] : '';
+            const tobe  = m['To-Be(万円)']!=null ? Number(r[m['To-Be(万円)']]||0) : 0;
+            const days  = m['年間日数']!=null ? Number(r[m['年間日数']]||0) : 0;
+            const dh    = m['1日時間(h)']!=null ? Number(r[m['1日時間(h)']]||0) : 0;
+
+            const sAsIs = m['収入源AsIs(万円)']!=null ? Number(r[m['収入源AsIs(万円)']]||0) : null;
+            const sTobe = m['収入源ToBe(万円)']!=null ? Number(r[m['収入源ToBe(万円)']]||0) : null;
+            const color = m['色']!=null ? (r[m['色']]||'').trim() : '';
+            const sNote = m['収入源メモ']!=null ? r[m['収入源メモ']] : '';
+            const dNote = m['内訳メモ']!=null ? r[m['内訳メモ']] : '';
+            const tiRaw = m['目標年収(万円)']!=null ? r[m['目標年収(万円)']] : '';
+            if(tiRaw!=='' && !isNaN(Number(tiRaw))) tgtIncome = Number(tiRaw);
+
+            if(!byName.has(name)){
+              const colorKey = Object.prototype.hasOwnProperty.call(COLOR_MAP, color) ? color : 'その他';
+              byName.set(name, { id: uid(), name, asis: 0, tobe: 0, note: '', colorKey, details: [] });
+            }
+            const s = byName.get(name);
+            if(sAsIs!=null) s.asis = sAsIs;
+            if(sTobe!=null) s.tobe = sTobe;
+            if(sNote) s.note = sNote;
+            if(color) s.colorKey = Object.prototype.hasOwnProperty.call(COLOR_MAP, color) ? color : s.colorKey;
+
+            const hasDetail = (dName && dName !== '(未設定)') || (tobe||days||dh);
+            if(hasDetail){
+              s.details.push({ id: uid(), name: dName||'(未設定)', tobe: tobe||0, days: days||0, dayHours: dh||0, note: dNote||'' });
+            }
+          }
+
+          const sources = Array.from(byName.values());
+          sources.forEach(s=>{ if(!s.tobe) s.tobe = s.details.reduce((a,d)=> a + Number(d.tobe||0), 0); });
+
+          state.sources = sources.slice(0,8);
+          state.gridOrder = Array(8).fill(null);
+          state.sources.forEach((s,i)=>{ if(i<8) state.gridOrder[i] = s.id; });
+          state.activeSourceId = state.sources[0]?.id ?? null;
+          if(tgtIncome!=null) state.targetIncome = tgtIncome;
+
+          renderAll(); save(); toast('CSVを読み込みました');
+        }catch(err){
+          console.error(err);
+          alert('CSV読み込み失敗：出力CSVと同じ列見出しを使用してください');
+        }
+      };
+      reader.readAsText(file);
+    }
+    function registerIOBindings(){
+      document.getElementById('btnExportJSON')?.addEventListener('click', exportJSON);
+      document.getElementById('btnExportCSV')?.addEventListener('click', exportCSV);
+      document.getElementById('fileImport')?.addEventListener('change', e=>{
+        const f = e.target.files[0]; if(!f) return; importJSONFile(f); e.target.value='';
+      });
+      document.getElementById('fileImportCSV')?.addEventListener('change', e=>{
+        const f = e.target.files[0]; if(!f) return; importCSVFile(f); e.target.value='';
+      });
+    }
+
+    /* ============== form & boot ============== */
+    function loadSrcFormFromState(){
+      const s = getActiveSource();
+      if(!s){ srcForm = {name:'', asis:0, tobe:0, note:'', colorKey:'その他'}; return; }
+      srcForm = { name: s.name||'', asis: Number(s.asis||0), tobe: Number(s.tobe||0), note: s.note||'', colorKey: s.colorKey || 'その他' };
+    }
+    function writeSrcFormToState(){
+      const s = getActiveSource(); if(!s) return;
+      s.name = srcForm.name||''; s.asis = Number(srcForm.asis||0); s.tobe = Number(srcForm.tobe||0);
+      s.note = srcForm.note||''; s.colorKey = srcForm.colorKey || s.colorKey || 'その他';
+    }
+    function renderAll(){
+      document.getElementById('targetIncome').addEventListener('input', e=>{
+        state.targetIncome = Number(e.target.value||0);
+        document.getElementById('centerIncome').textContent = fmt(state.targetIncome);
+        updatePrompt();
+      });
+      document.getElementById('targetNote').addEventListener('input', e=>{
+        state.targetNote = e.target.value; updatePrompt();
+      });
+
+      document.getElementById('srcName').addEventListener('input', e=>{ srcForm.name = e.target.value; });
+      document.getElementById('srcAsIs').addEventListener('input', e=>{ srcForm.asis = Number(e.target.value||0); });
+      document.getElementById('srcToBe').addEventListener('input', e=>{
+        srcForm.tobe = Number(e.target.value||0);
+        document.getElementById('srcTobeCenter').textContent = fmt(srcForm.tobe||0);
+      });
+      document.getElementById('srcNote').addEventListener('input', e=>{ srcForm.note = e.target.value; });
+
+      document.getElementById('btnSave').addEventListener('click', save);
+      document.getElementById('btnReset').addEventListener('click', reset);
+      document.getElementById('btnAddSource').addEventListener('click', ()=>{
+        const pos = state.gridOrder.indexOf(null);
+        if(pos === -1) return alert('8枠すべて使用中です。どれか削除してください。');
+        addSourceAt(pos);
+      });
+
+      document.getElementById('btnSrcSave').addEventListener('click', ()=>{
+        writeSrcFormToState(); save(); renderTop(); renderMini(); updatePrompt(); toast('登録しました');
+      });
+      document.getElementById('btnSrcCancel').addEventListener('click', ()=>{
+        loadSrcFormFromState(); renderMini(); toast('キャンセルしました');
+      });
+      document.getElementById('btnSrcDelete').addEventListener('click', ()=>{
+        const s = getActiveSource(); if(!s) return;
+        if(!confirm('この収入源を削除しますか？')) return;
+        const idx = state.sources.findIndex(x=>x.id===s.id);
+        if(idx>=0){
+          const removed = state.sources.splice(idx,1)[0];
+          state.gridOrder = state.gridOrder.map(id => id===removed.id ? null : id);
+          ensureGridIdMap();
+          state.activeSourceId = state.sources[0]?.id || null;
+          renderTop(); loadSrcFormFromState(); renderMini(); updatePrompt(); toast('削除しました');
+        }
+      });
+
+      registerIOBindings();
+      bindCopyButton();
+
+      renderTop(); loadSrcFormFromState(); renderMini(); updateCapacity(); updateCharts(); updatePrompt();
+    }
+
+    function bindCopyButton(){
+      const btn = document.getElementById('btnCopyPrompt');
+      if(!btn) return;
+      btn.addEventListener('click', async ()=>{
+        const text = document.getElementById('promptBox')?.value ?? '';
+        if(!text){ toast('コピーする内容がありません'); return; }
+        try{ await navigator.clipboard.writeText(text); toast('プロンプトをコピーしました'); }
+        catch(_){
+          const tmp = document.createElement('textarea');
+          tmp.value = text; tmp.style.position='fixed'; tmp.style.top='-1000px'; tmp.style.opacity='0';
+          document.body.appendChild(tmp); tmp.focus(); tmp.select();
+          const ok = document.execCommand('copy'); document.body.removeChild(tmp);
+          toast(ok ? 'プロンプトをコピーしました' : 'コピーに失敗しました');
+        }
+      });
+    }
+
+    window.addEventListener('load', load);
   </script>
 </body>
 </html>
